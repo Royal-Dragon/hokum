@@ -60,6 +60,10 @@ pub struct Ui {
     /// The settings window, which Hokum's own cards open; None when headless.
     pub window: Option<AppHandle<crate::settings::Ui>>,
     shown: bool,
+    /// The overlay was just shown and has not drawn yet: its first frame is empty, so the cards
+    /// are inserted into a tree that is already mounted and play their enter. Anything in the
+    /// first frame of a surface mounts at rest.
+    held: bool,
     hide_at: Option<Instant>,
     /// Each card's height as last laid out, to show only the cards that fit.
     heights: HashMap<u32, f32>,
@@ -82,6 +86,7 @@ impl Ui {
             handle: None,
             window: None,
             shown: false,
+            held: false,
             hide_at: None,
             heights: HashMap::new(),
             overlay_h: HEIGHT,
@@ -210,8 +215,14 @@ impl Ui {
         {
             h.show();
             self.shown = true;
+            self.held = true;
         }
         self.reschedule();
+    }
+
+    /// The cards the view draws: none until the overlay's first frame is laid out.
+    fn visible(&self) -> &[Note] {
+        if self.held { &[] } else { &self.notes }
     }
 
     pub fn showing(&self, id: u32) -> bool {
@@ -341,6 +352,7 @@ impl Ui {
                 h.hide();
             }
             self.shown = false;
+            self.held = false;
             self.paused = false;
         }
         self.reschedule();
@@ -605,8 +617,9 @@ pub fn view(s: &Ui, _: &mut Cx<Ui>) -> El {
     let k = rune_theme_opencode::kit(s.dark());
     let pill_h = (28.0 * crate::textscale::get()).round();
     let spacing = s.theme.base(s.dark()).spacing;
+    let notes = s.visible();
     let shown = fitting(
-        &s.notes,
+        notes,
         s.settings.max_shown,
         &s.heights,
         spacing,
@@ -614,16 +627,22 @@ pub fn view(s: &Ui, _: &mut Cx<Ui>) -> El {
         s.overlay_h - GUTTER,
         pill_h,
     );
-    let hidden = s.notes.len().saturating_sub(shown);
+    let hidden = notes.len().saturating_sub(shown);
     let pill = (hidden > 0).then(|| more(hidden, k));
-    el().key("root").w_full().h_full().child(stack::<Ui>(
-        &s.notes,
+    let root = el().key("root").w_full().h_full().child(stack::<Ui>(
+        notes,
         shown,
         &s.settings,
         &s.theme,
         k,
         pill,
-    ))
+    ));
+    // Once the empty tree is laid out, let the cards in: they enter instead of mounting at rest.
+    if s.held {
+        root.on_layout(|s: &mut Ui, _| s.held = false)
+    } else {
+        root
+    }
 }
 
 pub fn overlay(config: &Config) -> rune::ConfiguredOverlay<Ui> {
@@ -1037,5 +1056,15 @@ mod tests {
         ui.close(1, Reason::Expired);
         ui.upsert(volume(2, 0.5));
         assert_eq!((ui.notes[0].id, ui.notes[0].slot), (2, 2));
+    }
+
+    #[test]
+    fn a_just_shown_overlay_draws_no_cards_until_it_is_laid_out() {
+        let (mut ui, _rx) = ui();
+        ui.upsert(volume(1, 0.4));
+        ui.held = true;
+        assert!(ui.visible().is_empty());
+        ui.held = false;
+        assert_eq!(ui.visible().len(), 1);
     }
 }
